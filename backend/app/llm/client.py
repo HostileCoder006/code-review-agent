@@ -23,7 +23,14 @@ class LLMClient:
     def _get_openai(self):
         if self._openai is None:
             from openai import AsyncOpenAI
-            self._openai = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+            self._openai = AsyncOpenAI(
+                api_key=settings.OPENAI_API_KEY,
+                base_url=settings.OPENAI_BASE_URL,
+                default_headers={
+                    "HTTP-Referer": "https://github.com/HostileCoder006/code-review-agent",
+                    "X-Title": "Autonomous Code Review Agent",
+                },
+            )
         return self._openai
 
     @retry(

@@ -24,9 +24,10 @@ class Settings(BaseSettings):
     GITHUB_CLIENT_ID: str = ""
     GITHUB_CLIENT_SECRET: str = ""
 
-    # LLM
+    # LLM (OpenRouter compatible)
     OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-4o"
+    OPENAI_MODEL: str = "openai/gpt-4o"
+    OPENAI_BASE_URL: str = "https://openrouter.ai/api/v1"
     LOCAL_LLM_URL: Optional[str] = None
 
     # Sandbox
