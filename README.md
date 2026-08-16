@@ -12,17 +12,18 @@ An autonomous agent that reviews GitHub pull requests like a senior software eng
 When a PR is opened, the agent:
 
 1. **Indexes** the repository using AST parsing (Tree-sitter) and builds a dependency graph
-2. **Analyzes impact** — identifies which callers, dependents, API consumers, and tests may be affected
+2. **Analyzes impact** — identifies which callers, dependents, API consumers, and tests are affected
 3. **Spawns specialized agents** in parallel:
    - **Bug Agent** — logic errors, type coercions, race conditions, null dereferences
-   - **Security Agent** — SQL injection, command injection, SSRF, hardcoded secrets (via data-flow tracing)
+   - **Security Agent** — SQL injection, command injection, SSRF, hardcoded secrets (data-flow tracing)
    - **Performance Agent** — N+1 queries, O(n²) algorithms, memory accumulation
 4. **Generates minimal reproduction tests** for high-confidence findings
-5. **Executes tests** inside an isolated Docker sandbox (no network, CPU/memory limits)
+5. **Executes tests** in an isolated Python venv (no Docker needed)
 6. **Runs self-review** — discards speculative, duplicate, or style-only findings
 7. **Posts evidence-backed findings** as inline GitHub PR comments
 
 Every finding has an evidence level:
+
 | Level | Meaning |
 |-------|---------|
 | `potential` | Suspected through static analysis |
@@ -39,7 +40,7 @@ GitHub Webhook
     ↓
 FastAPI Webhook Handler
     ↓
-arq Background Worker
+arq Background Worker (Redis)
     ↓
 Review Orchestrator
     ↓
@@ -56,7 +57,7 @@ Specialized Agents (parallel)
     ↓
 Test Agent (per finding)
     ↓
-Docker Sandbox (isolated execution)
+Venv Sandbox (isolated Python venv per test)
     ↓
 Self-Review Agent (quality gate)
     ↓
@@ -67,85 +68,120 @@ PostgreSQL (findings, timeline, evidence)
 
 ---
 
-## Quick Start
+## Requirements
 
-### Prerequisites
+- **Python 3.11+** — https://python.org
+- **Node.js 20+** — https://nodejs.org
+- **PostgreSQL 15+** — https://www.postgresql.org/download/windows/
+- **Redis** — `winget install Redis.Redis` or https://github.com/microsoftarchive/redis/releases
+- **OpenRouter API key** — https://openrouter.ai/keys
+- **GitHub App** — https://github.com/settings/apps/new
+- **ngrok** (for webhook tunnel) — https://ngrok.com/download
 
-- Docker & Docker Compose
-- A GitHub App ([create one](https://github.com/settings/apps/new))
-- OpenAI API key
+---
 
-### 1. Clone and configure
+## Quick Start (Windows)
 
-```bash
-git clone <repo>
-cd coderev
-cp .env.example .env
-# Edit .env with your credentials
+### 1. Clone the repo
+
+```bat
+git clone https://github.com/HostileCoder006/code-review-agent.git
+cd code-review-agent
 ```
 
-### 2. GitHub App setup
+### 2. Configure environment
 
-Create a GitHub App with:
-- **Permissions**: Pull requests (read/write), Contents (read), Checks (write), Issues (read)
-- **Webhook events**: Pull requests
-- **Webhook URL**: `https://your-domain.com/api/v1/webhooks/github`
-
-Download the private key PEM and set `GITHUB_APP_PRIVATE_KEY_PATH` in `.env`.
-
-### 3. Start
-
-```bash
-docker-compose up --build
+```bat
+copy .env.example .env
 ```
 
-- Backend API: http://localhost:8000
-- Frontend: http://localhost:3000
-- API docs: http://localhost:8000/docs
+Edit `.env` with your credentials:
+
+```env
+GITHUB_APP_ID=your_app_id
+GITHUB_APP_PRIVATE_KEY_PATH=./github-app.pem
+GITHUB_WEBHOOK_SECRET=your_webhook_secret
+OPENAI_API_KEY=sk-or-...
+OPENAI_MODEL=anthropic/claude-haiku-4-5
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+DATABASE_URL=postgresql+asyncpg://coderev:coderev@localhost:5432/coderev
+REDIS_URL=redis://localhost:6379/0
+SANDBOX_WORKSPACE_DIR=C:\Users\YOUR_USERNAME\coderev_sandboxes
+SECRET_KEY=any-random-string
+```
+
+Copy your GitHub App `.pem` file to the project root as `github-app.pem`.
+
+### 3. Install dependencies
+
+```bat
+scripts\setup.bat
+```
+
+### 4. Set up the database
+
+Make sure PostgreSQL is running, then:
+
+```bat
+scripts\setup-db.bat
+```
+
+### 5. Start ngrok tunnel
+
+```bat
+ngrok http 8000
+```
+
+Copy the `https://xxx.ngrok-free.app` URL and set it as your GitHub App's webhook URL:
+```
+https://xxx.ngrok-free.app/api/v1/webhooks/github
+```
+
+### 6. Start everything
+
+```bat
+scripts\start-all.bat
+```
+
+This opens 3 terminal windows:
+- **Backend** → http://localhost:8000
+- **Worker** → background job processor
+- **Frontend** → http://localhost:3000
+
+### 7. Install GitHub App on a repo
+
+Go to https://github.com/settings/apps → click your app → **Install App** → pick a repo.
+
+Open a Pull Request in that repo and watch the agent run at **http://localhost:3000**.
+
+---
+
+## Running services individually
+
+```bat
+:: Backend API
+scripts\start-backend.bat
+
+:: Background worker (separate terminal)
+scripts\start-worker.bat
+
+:: Frontend
+scripts\start-frontend.bat
+```
 
 ---
 
 ## Development
 
-### Backend
+### Backend tests
 
-```bash
+```bat
 cd backend
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-cp ../.env.example .env
-
-# Run DB migrations
-alembic upgrade head
-
-# Start API
-uvicorn app.main:app --reload
-
-# Start worker
-python -m arq app.worker.WorkerSettings
+venv\Scripts\activate
+pytest tests\ -v
 ```
 
-### Run tests
-
-```bash
-cd backend
-pytest tests/ -v
-```
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
----
-
-## Benchmark
-
-Evaluate the agent against historical bugs:
+### Run the benchmark
 
 ```python
 from app.benchmark.runner import run_benchmark
@@ -153,9 +189,9 @@ import asyncio
 
 summary = asyncio.run(run_benchmark())
 print(f"Precision: {summary.precision}")
-print(f"Recall: {summary.recall}")
-print(f"F1: {summary.f1}")
-print(f"Reproduction rate: {summary.reproduction_rate}")
+print(f"Recall:    {summary.recall}")
+print(f"F1:        {summary.f1}")
+print(f"Reproduced:{summary.reproduction_rate}")
 ```
 
 ---
@@ -163,43 +199,43 @@ print(f"Reproduction rate: {summary.reproduction_rate}")
 ## Project Structure
 
 ```
-coderev/
+code-review-agent/
+├── scripts/
+│   ├── setup.bat          # Install all dependencies
+│   ├── setup-db.bat       # Create DB + run migrations
+│   ├── start-all.bat      # Launch all 3 services
+│   ├── start-backend.bat  # FastAPI backend
+│   ├── start-worker.bat   # arq background worker
+│   └── start-frontend.bat # Next.js frontend
 ├── backend/
 │   ├── app/
-│   │   ├── agents/          # Specialized investigation agents
-│   │   │   ├── base.py      # Agent base class (state, retry, tool dispatch)
-│   │   │   ├── bug_agent.py
-│   │   │   ├── security_agent.py
-│   │   │   ├── performance_agent.py
-│   │   │   ├── test_agent.py
-│   │   │   ├── self_review_agent.py
-│   │   │   └── tools.py     # Shared agent tools
-│   │   ├── api/v1/          # FastAPI routes
-│   │   ├── benchmark/       # Evaluation framework
-│   │   ├── core/            # Config, DB, Redis, logging
-│   │   ├── github/          # GitHub App auth + client
-│   │   ├── intelligence/    # AST parser, dependency graph, repo context
-│   │   ├── llm/             # LLM client (OpenAI)
-│   │   ├── models/          # SQLAlchemy models
-│   │   ├── orchestrator/    # Review orchestrator (main pipeline)
-│   │   ├── publisher/       # GitHub comment/check publisher
-│   │   ├── sandbox/         # Docker sandbox executor
-│   │   ├── schemas/         # Pydantic response schemas
-│   │   └── worker/          # arq background jobs
+│   │   ├── agents/        # Bug, Security, Performance, Test, Self-Review agents
+│   │   ├── api/v1/        # FastAPI routes (webhooks, reviews, findings, stats)
+│   │   ├── benchmark/     # Precision/recall evaluation framework
+│   │   ├── core/          # Config, DB, Redis, logging
+│   │   ├── github/        # GitHub App auth + REST client
+│   │   ├── intelligence/  # AST parser, dependency graph, repo context builder
+│   │   ├── llm/           # OpenRouter LLM client
+│   │   ├── models/        # SQLAlchemy models
+│   │   ├── orchestrator/  # Main review pipeline
+│   │   ├── publisher/     # GitHub PR comment + check run publisher
+│   │   ├── sandbox/       # Isolated venv test executor
+│   │   ├── schemas/       # Pydantic schemas
+│   │   └── worker/        # arq job definitions
 │   └── tests/
 └── frontend/
-    ├── app/                 # Next.js App Router pages
-    ├── components/          # React components
-    └── lib/                 # API client, utilities
+    ├── app/               # Next.js pages (dashboard, reviews, repos, stats)
+    ├── components/        # React components
+    └── lib/               # API client, utilities
 ```
 
 ---
 
 ## Key Design Principles
 
-- **Evidence over assertion** — agents must cite code before reporting an issue
+- **Evidence over assertion** — agents cite actual code before reporting an issue
 - **Precision over quantity** — 2 verified findings beat 20 speculative ones
-- **Repository-level reasoning** — impact analysis beyond the changed lines
-- **Isolated execution** — no untrusted code runs on the host
+- **Repository-level reasoning** — impact analysis beyond just the changed lines
+- **Isolated execution** — each test runs in a throwaway Python venv
 - **Structured agent state** — findings carry evidence, tests, and reproduction status
 - **Self-review gate** — a final agent discards weak findings before publishing

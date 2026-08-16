@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -22,19 +23,15 @@ class Settings(BaseSettings):
     GITHUB_APP_PRIVATE_KEY_PATH: str = "./github-app.pem"
     GITHUB_WEBHOOK_SECRET: str = ""
     GITHUB_CLIENT_ID: str = ""
-    GITHUB_CLIENT_SECRET: str = ""
 
-    # LLM (OpenRouter compatible)
+    # LLM (OpenRouter compatible — uses OpenAI SDK)
     OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "openai/gpt-4o"
+    OPENAI_MODEL: str = "anthropic/claude-haiku-4-5"
     OPENAI_BASE_URL: str = "https://openrouter.ai/api/v1"
     LOCAL_LLM_URL: Optional[str] = None
 
-    # Sandbox
-    SANDBOX_DOCKER_HOST: str = "unix:///var/run/docker.sock"
-    SANDBOX_WORKSPACE_DIR: str = "/tmp/coderev_sandboxes"
-    SANDBOX_CPU_QUOTA: int = 50000
-    SANDBOX_MEM_LIMIT: str = "512m"
+    # Sandbox — isolated venv per test run (no Docker needed)
+    SANDBOX_WORKSPACE_DIR: str = str(Path.home() / "coderev_sandboxes")
     SANDBOX_TIMEOUT_SECONDS: int = 120
 
     # Agent limits

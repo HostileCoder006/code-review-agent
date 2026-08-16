@@ -1,13 +1,15 @@
 """
-Isolated Docker sandbox for test execution.
-Runs generated tests safely with resource limits and cleanup.
+Sandbox executor — runs generated tests in isolated Python venvs.
+Works natively on Windows without Docker.
+Each test gets its own throwaway venv that is deleted after execution.
 """
 from __future__ import annotations
 
 import asyncio
 import os
 import shutil
-import tempfile
+import sys
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,9 +20,6 @@ import structlog
 from app.core.config import settings
 
 log = structlog.get_logger(__name__)
-
-SANDBOX_IMAGE = "python:3.12-slim"
-PYTEST_INSTALL = "pip install pytest pytest-timeout -q"
 
 
 @dataclass
@@ -37,8 +36,11 @@ class SandboxResult:
 
 class SandboxExecutor:
     """
-    Executes test code inside a Docker container with strict resource limits.
-    Never runs untrusted code on the host.
+    Executes generated test code in an isolated Python venv.
+    Each execution gets a fresh throwaway venv and workspace directory
+    that is cleaned up after the run.
+
+    No Docker required — works natively on Windows, Linux, and macOS.
     """
 
     def __init__(self):
@@ -53,7 +55,7 @@ class SandboxExecutor:
         timeout: int | None = None,
     ) -> SandboxResult:
         """
-        Run pytest test code in an isolated Docker container.
+        Run pytest test code in an isolated venv.
 
         Args:
             test_code: The pytest test file content
@@ -66,7 +68,7 @@ class SandboxExecutor:
         workspace.mkdir(parents=True, exist_ok=True)
 
         try:
-            return await self._execute(
+            return await self._execute_in_venv(
                 workspace=workspace,
                 workspace_id=workspace_id,
                 test_code=test_code,
@@ -77,7 +79,7 @@ class SandboxExecutor:
         finally:
             self._cleanup(workspace)
 
-    async def _execute(
+    async def _execute_in_venv(
         self,
         workspace: Path,
         workspace_id: str,
@@ -86,62 +88,72 @@ class SandboxExecutor:
         source_code: dict[str, str],
         timeout: int,
     ) -> SandboxResult:
-        import time
+        start = time.monotonic()
+        venv_dir = workspace / "venv"
 
-        # Write files to workspace
-        test_file = workspace / "test_reproduction.py"
-        test_file.write_text(test_code)
+        # Write test file
+        (workspace / "test_reproduction.py").write_text(test_code, encoding="utf-8")
 
+        # Write any source files needed by the test
         for filename, content in source_code.items():
             dest = workspace / filename
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content)
+            dest.write_text(content, encoding="utf-8")
 
-        # Build install command
-        pkgs = ["pytest", "pytest-timeout"] + requirements
-        install_cmd = f"pip install {' '.join(pkgs)} -q 2>&1"
+        # Platform-aware paths
+        is_windows = os.name == "nt"
+        scripts = "Scripts" if is_windows else "bin"
+        pip_exe = str(venv_dir / scripts / "pip.exe" if is_windows else venv_dir / scripts / "pip")
+        pytest_exe = str(venv_dir / scripts / "pytest.exe" if is_windows else venv_dir / scripts / "pytest")
 
-        # Full command
-        run_cmd = f"cd /workspace && {install_cmd} && python -m pytest test_reproduction.py -v --timeout=30 --tb=short 2>&1"
-
-        # Docker run command
-        docker_cmd = [
-            "docker", "run",
-            "--rm",
-            "--network=none",                                  # no network access
-            f"--memory={settings.SANDBOX_MEM_LIMIT}",
-            f"--cpu-quota={settings.SANDBOX_CPU_QUOTA}",
-            "--pids-limit=64",
-            "--security-opt=no-new-privileges",
-            f"--volume={workspace}:/workspace:ro",
-            "--workdir=/workspace",
-            "--tmpfs=/tmp:size=64m",
-            SANDBOX_IMAGE,
-            "bash", "-c", run_cmd,
-        ]
-
-        start = time.monotonic()
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *docker_cmd,
+            # Step 1: create venv
+            venv_proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "venv", str(venv_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(venv_proc.communicate(), timeout=60)
+
+            # Step 2: install dependencies
+            pkgs = ["pytest", "pytest-timeout"] + requirements
+            pip_proc = await asyncio.create_subprocess_exec(
+                pip_exe, "install", *pkgs, "-q",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(pip_proc.communicate(), timeout=120)
+
+            # Step 3: run pytest
+            test_proc = await asyncio.create_subprocess_exec(
+                pytest_exe,
+                "test_reproduction.py",
+                "-v", "--tb=short", "--timeout=30", "--no-header",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                cwd=str(workspace),
             )
+
             try:
-                stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 30)
+                stdout_bytes, _ = await asyncio.wait_for(
+                    test_proc.communicate(), timeout=timeout
+                )
             except asyncio.TimeoutError:
-                proc.kill()
+                test_proc.kill()
+                duration_ms = int((time.monotonic() - start) * 1000)
+                log.warning("sandbox_timeout", workspace_id=workspace_id)
                 return SandboxResult(
                     success=False, exit_code=-1,
                     stdout="", stderr="Execution timed out",
-                    duration_ms=int((time.monotonic() - start) * 1000),
-                    test_passed=False, test_output="Timed out",
+                    duration_ms=duration_ms,
+                    test_passed=False,
+                    test_output=f"Test timed out after {timeout}s",
                     workspace_id=workspace_id,
                 )
 
             duration_ms = int((time.monotonic() - start) * 1000)
             output = stdout_bytes.decode("utf-8", errors="replace")
-            exit_code = proc.returncode or 0
+            exit_code = test_proc.returncode or 0
             test_passed = exit_code == 0 and "passed" in output.lower()
 
             log.info(
@@ -159,82 +171,19 @@ class SandboxExecutor:
                 stderr="",
                 duration_ms=duration_ms,
                 test_passed=test_passed,
-                test_output=output[-3000:],  # last 3k chars of output
-                workspace_id=workspace_id,
-            )
-
-        except FileNotFoundError:
-            # Docker not available — run with subprocess isolation as fallback
-            log.warning("docker_not_available_falling_back_to_subprocess")
-            return await self._subprocess_fallback(
-                workspace, workspace_id, test_code, requirements, timeout
-            )
-        except Exception as e:
-            log.error("sandbox_execution_failed", error=str(e))
-            return SandboxResult(
-                success=False, exit_code=-1,
-                stdout="", stderr=str(e),
-                duration_ms=0,
-                test_passed=False, test_output=f"Sandbox error: {e}",
-                workspace_id=workspace_id,
-            )
-
-    async def _subprocess_fallback(
-        self,
-        workspace: Path,
-        workspace_id: str,
-        test_code: str,
-        requirements: list[str],
-        timeout: int,
-    ) -> SandboxResult:
-        """Fallback when Docker is unavailable. Runs in a temp venv."""
-        import time
-        import sys
-
-        start = time.monotonic()
-        venv_dir = workspace / "venv"
-
-        try:
-            # Create venv
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "venv", str(venv_dir),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
-
-            pip = str(venv_dir / "bin" / "pip") if os.name != "nt" else str(venv_dir / "Scripts" / "pip")
-            pytest_bin = str(venv_dir / "bin" / "pytest") if os.name != "nt" else str(venv_dir / "Scripts" / "pytest")
-
-            pkgs = ["pytest", "pytest-timeout"] + requirements
-            proc = await asyncio.create_subprocess_exec(
-                pip, "install", *pkgs, "-q",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            await asyncio.wait_for(proc.communicate(), timeout=60)
-
-            proc = await asyncio.create_subprocess_exec(
-                pytest_bin, str(workspace / "test_reproduction.py"), "-v", "--tb=short",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                cwd=str(workspace),
-            )
-            stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            output = stdout_bytes.decode("utf-8", errors="replace")
-            exit_code = proc.returncode or 0
-
-            return SandboxResult(
-                success=True, exit_code=exit_code,
-                stdout=output, stderr="",
-                duration_ms=int((time.monotonic() - start) * 1000),
-                test_passed=exit_code == 0,
                 test_output=output[-3000:],
                 workspace_id=workspace_id,
             )
+
         except Exception as e:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            log.error("sandbox_execution_failed", error=str(e), workspace_id=workspace_id)
             return SandboxResult(
                 success=False, exit_code=-1,
                 stdout="", stderr=str(e),
-                duration_ms=int((time.monotonic() - start) * 1000),
-                test_passed=False, test_output=f"Fallback error: {e}",
+                duration_ms=duration_ms,
+                test_passed=False,
+                test_output=f"Sandbox error: {e}",
                 workspace_id=workspace_id,
             )
 
