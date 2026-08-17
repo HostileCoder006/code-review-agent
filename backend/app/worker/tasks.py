@@ -2,9 +2,11 @@
 Background job tasks using arq (Redis-backed job queue).
 """
 import structlog
+from arq.connections import RedisSettings
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.models.review import Review
 from app.orchestrator.review_orchestrator import ReviewOrchestrator
@@ -33,31 +35,22 @@ async def run_review(ctx, review_id: str, installation_id: int):
     log.info("job_completed", review_id=review_id)
 
 
+def _redis_settings() -> RedisSettings:
+    return RedisSettings.from_dsn(settings.REDIS_URL)
+
+
 async def enqueue_review(review_id: str, installation_id: int):
     """Enqueue a review job via arq."""
     from arq import create_pool
-    from app.core.config import settings
 
-    redis = await create_pool({"host": settings.REDIS_URL})
+    redis = await create_pool(_redis_settings())
     await redis.enqueue_job("run_review", review_id=review_id, installation_id=installation_id)
     await redis.close()
     log.info("review_enqueued", review_id=review_id)
 
 
 class WorkerSettings:
-    redis_settings_from_url = None
     functions = [run_review]
     max_jobs = 5
     job_timeout = 600  # 10 minutes max per job
-
-    @classmethod
-    def get_redis_settings(cls):
-        from arq.connections import RedisSettings
-        from app.core.config import settings
-        import re
-        # Parse redis URL
-        m = re.match(r"redis://([^:/]+):?(\d+)?/(\d+)?", settings.REDIS_URL)
-        host = m.group(1) if m else "localhost"
-        port = int(m.group(2)) if m and m.group(2) else 6379
-        db = int(m.group(3)) if m and m.group(3) else 0
-        return RedisSettings(host=host, port=port, database=db)
+    redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)

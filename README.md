@@ -5,6 +5,8 @@
 An autonomous agent that reviews GitHub pull requests like a senior software engineer:
 **Observe → Understand → Plan → Investigate → Reproduce → Verify → Recommend → Re-test**
 
+This project runs **natively on Windows** for development. Docker is not required.
+
 ---
 
 ## What it does
@@ -18,7 +20,7 @@ When a PR is opened, the agent:
    - **Security Agent** — SQL injection, command injection, SSRF, hardcoded secrets (data-flow tracing)
    - **Performance Agent** — N+1 queries, O(n²) algorithms, memory accumulation
 4. **Generates minimal reproduction tests** for high-confidence findings
-5. **Executes tests** in an isolated Python venv (no Docker needed)
+5. **Executes tests** in an isolated Python venv (native sandbox, no Docker)
 6. **Runs self-review** — discards speculative, duplicate, or style-only findings
 7. **Posts evidence-backed findings** as inline GitHub PR comments
 
@@ -68,15 +70,19 @@ PostgreSQL (findings, timeline, evidence)
 
 ---
 
-## Requirements
+## Requirements (Windows)
 
-- **Python 3.11+** — https://python.org
-- **Node.js 20+** — https://nodejs.org
-- **PostgreSQL 15+** — https://www.postgresql.org/download/windows/
-- **Redis** — `winget install Redis.Redis` or https://github.com/microsoftarchive/redis/releases
-- **OpenRouter API key** — https://openrouter.ai/keys
-- **GitHub App** — https://github.com/settings/apps/new
-- **ngrok** (for webhook tunnel) — https://ngrok.com/download
+Install these natively — nothing runs in Docker:
+
+| Dependency | Notes |
+|------------|--------|
+| **Python 3.11+** | https://python.org — tick “Add to PATH” |
+| **Node.js 20+** | https://nodejs.org |
+| **PostgreSQL 15+** | https://www.postgresql.org/download/windows/ — service on port `5432` |
+| **Redis** | `winget install Redis.Redis` or [Microsoft Redis releases](https://github.com/microsoftarchive/redis/releases) — port `6379` |
+| **OpenRouter API key** | https://openrouter.ai/keys |
+| **GitHub App** | https://github.com/settings/apps/new |
+| **ngrok** (webhook tunnel) | https://ngrok.com/download |
 
 ---
 
@@ -108,9 +114,16 @@ DATABASE_URL=postgresql+asyncpg://coderev:coderev@localhost:5432/coderev
 REDIS_URL=redis://localhost:6379/0
 SANDBOX_WORKSPACE_DIR=C:\Users\YOUR_USERNAME\coderev_sandboxes
 SECRET_KEY=any-random-string
+FRONTEND_URL=http://localhost:3000
 ```
 
 Copy your GitHub App `.pem` file to the project root as `github-app.pem`.
+
+Optional frontend override:
+
+```bat
+copy frontend\.env.local.example frontend\.env.local
+```
 
 ### 3. Install dependencies
 
@@ -118,56 +131,82 @@ Copy your GitHub App `.pem` file to the project root as `github-app.pem`.
 scripts\setup.bat
 ```
 
+Creates the Python venv, installs backend + frontend packages, and prepares the sandbox directory.
+
 ### 4. Set up the database
 
-Make sure PostgreSQL is running, then:
+Start the PostgreSQL Windows service, then:
 
 ```bat
 scripts\setup-db.bat
 ```
 
-### 5. Start ngrok tunnel
+Creates the `coderev` user/database and application tables.
+
+### 5. Start Redis
+
+Ensure Redis is listening on `localhost:6379` (Windows service or `redis-server`).
+
+### 6. Start ngrok tunnel
 
 ```bat
 ngrok http 8000
 ```
 
-Copy the `https://xxx.ngrok-free.app` URL and set it as your GitHub App's webhook URL:
+Set your GitHub App webhook URL to:
+
 ```
 https://xxx.ngrok-free.app/api/v1/webhooks/github
 ```
 
-### 6. Start everything
+### 7. Start application services
 
 ```bat
 scripts\start-all.bat
 ```
 
-This opens 3 terminal windows:
-- **Backend** → http://localhost:8000
-- **Worker** → background job processor
-- **Frontend** → http://localhost:3000
+Opens three terminals:
 
-### 7. Install GitHub App on a repo
+| Window | URL / role |
+|--------|------------|
+| **Backend** | http://localhost:8000 — FastAPI + GitHub webhooks |
+| **Worker** | arq job processor (agents + sandbox) |
+| **Frontend** | http://localhost:3000 — dashboard |
 
-Go to https://github.com/settings/apps → click your app → **Install App** → pick a repo.
+### 8. Install GitHub App on a repo
 
-Open a Pull Request in that repo and watch the agent run at **http://localhost:3000**.
+Go to https://github.com/settings/apps → your app → **Install App** → pick a repo.
+
+Open a Pull Request and watch the agent at **http://localhost:3000**.
 
 ---
 
 ## Running services individually
 
 ```bat
-:: Backend API
+:: API + webhooks
 scripts\start-backend.bat
 
-:: Background worker (separate terminal)
+:: Background worker (agents, sandbox, publisher) — separate terminal
 scripts\start-worker.bat
 
-:: Frontend
+:: Dashboard
 scripts\start-frontend.bat
 ```
+
+---
+
+## Environment reference
+
+| Variable | Purpose |
+|----------|---------|
+| `GITHUB_APP_*` | GitHub App auth + webhook verification |
+| `OPENAI_*` | OpenRouter LLM (API key, model, base URL) |
+| `DATABASE_URL` | Local PostgreSQL (`localhost`, not a Docker hostname) |
+| `REDIS_URL` | Local Redis job queue |
+| `SANDBOX_WORKSPACE_DIR` | Temp dirs for isolated test venvs |
+| `FRONTEND_URL` | CORS origin for the dashboard |
+| `NEXT_PUBLIC_API_URL` | Frontend → backend URL (`frontend/.env.local`) |
 
 ---
 
@@ -201,9 +240,9 @@ print(f"Reproduced:{summary.reproduction_rate}")
 ```
 code-review-agent/
 ├── scripts/
-│   ├── setup.bat          # Install all dependencies
-│   ├── setup-db.bat       # Create DB + run migrations
-│   ├── start-all.bat      # Launch all 3 services
+│   ├── setup.bat          # Install all dependencies (native)
+│   ├── setup-db.bat       # Create DB + tables
+│   ├── start-all.bat      # Launch backend + worker + frontend
 │   ├── start-backend.bat  # FastAPI backend
 │   ├── start-worker.bat   # arq background worker
 │   └── start-frontend.bat # Next.js frontend
@@ -219,14 +258,18 @@ code-review-agent/
 │   │   ├── models/        # SQLAlchemy models
 │   │   ├── orchestrator/  # Main review pipeline
 │   │   ├── publisher/     # GitHub PR comment + check run publisher
-│   │   ├── sandbox/       # Isolated venv test executor
+│   │   ├── sandbox/       # Isolated venv test executor (native)
 │   │   ├── schemas/       # Pydantic schemas
 │   │   └── worker/        # arq job definitions
+│   ├── scripts/
+│   │   └── init_db.py     # Create tables without Docker/Alembic
 │   └── tests/
-└── frontend/
-    ├── app/               # Next.js pages (dashboard, reviews, repos, stats)
-    ├── components/        # React components
-    └── lib/               # API client, utilities
+├── frontend/
+│   ├── app/               # Next.js pages (dashboard, reviews, repos, stats)
+│   ├── components/        # React components
+│   └── lib/               # API client, utilities
+├── .env.example
+└── README.md
 ```
 
 ---
@@ -236,6 +279,6 @@ code-review-agent/
 - **Evidence over assertion** — agents cite actual code before reporting an issue
 - **Precision over quantity** — 2 verified findings beat 20 speculative ones
 - **Repository-level reasoning** — impact analysis beyond just the changed lines
-- **Isolated execution** — each test runs in a throwaway Python venv
+- **Isolated execution** — each test runs in a throwaway Python venv on the host
 - **Structured agent state** — findings carry evidence, tests, and reproduction status
 - **Self-review gate** — a final agent discards weak findings before publishing

@@ -95,10 +95,11 @@ Changed files:
 Steps:
 1. Call list_changed_files() to get an overview.
 2. For each changed file, call get_file_diff() to see what changed.
-3. For suspicious patterns, call get_function_source() to see the full function.
-4. Trace data flows — search_code() to find where user input enters the system.
-5. Check get_imports() to identify security-relevant libraries.
-6. Only report issues where you can trace the full vulnerable path.
+3. Call get_file_content() for suspicious files, especially non-Python code.
+4. For suspicious Python patterns, call get_function_source() to see the full function.
+5. Trace data flows — search_code() to find where user input enters the system.
+6. Check get_imports() to identify security-relevant libraries when available.
+7. Only report issues where you can trace the full vulnerable path.
 """
 
     async def investigate(self) -> list[dict]:

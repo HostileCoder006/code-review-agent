@@ -2,6 +2,10 @@
 API endpoint tests.
 """
 import pytest
+from sqlalchemy import select
+
+from app.api.v1.webhooks import _handle_installation, _handle_installation_repositories
+from app.models.repository import Repository
 
 
 @pytest.mark.asyncio
@@ -45,3 +49,66 @@ async def test_review_not_found(client):
 async def test_finding_not_found(client):
     resp = await client.get("/api/v1/findings/00000000-0000-0000-0000-000000000000")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_installation_webhook_records_repositories(db):
+    await _handle_installation(
+        db,
+        {
+            "installation": {
+                "id": 123,
+                "account": {"login": "octo", "type": "User"},
+            },
+            "repositories": [
+                {
+                    "id": 456,
+                    "full_name": "octo/example",
+                    "name": "example",
+                    "private": True,
+                }
+            ],
+        },
+    )
+
+    result = await db.execute(select(Repository).where(Repository.github_id == 456))
+    repo = result.scalar_one()
+    assert repo.full_name == "octo/example"
+    assert repo.owner == "octo"
+    assert repo.installation_id == 123
+    assert repo.private is True
+
+
+@pytest.mark.asyncio
+async def test_installation_repositories_added_and_removed_updates_repositories(db):
+    await _handle_installation_repositories(
+        db,
+        {
+            "installation": {"id": 999},
+            "repositories_added": [
+                {
+                    "id": 777,
+                    "full_name": "acme/web",
+                    "name": "web",
+                    "private": False,
+                }
+            ],
+            "repositories_removed": [],
+        },
+    )
+
+    result = await db.execute(select(Repository).where(Repository.github_id == 777))
+    repo = result.scalar_one()
+    assert repo.enabled is True
+    assert repo.installation_id == 999
+
+    await _handle_installation_repositories(
+        db,
+        {
+            "installation": {"id": 999},
+            "repositories_added": [],
+            "repositories_removed": [{"id": 777}],
+        },
+    )
+
+    assert repo.enabled is False

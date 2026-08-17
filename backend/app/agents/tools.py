@@ -18,22 +18,59 @@ log = structlog.get_logger(__name__)
 def make_repo_tools(ctx: RepoContext, client: GitHubClient):
     """Return a dict of tool handlers bound to the current repo context."""
 
+    def _changed_content_by_path() -> dict[str, str]:
+        return {
+            cf.filename: cf.raw_content
+            for cf in ctx.changed_files
+            if cf.raw_content
+        }
+
     async def search_code(query: str, file_pattern: Optional[str] = None) -> dict:
-        """Search for a pattern across all parsed files in the repository."""
+        """Search for a pattern across all fetched files in the repository."""
         results = []
-        for path, ast in ctx.file_asts.items():
+        searchable = {**_changed_content_by_path()}
+        for path in ctx.file_asts:
+            searchable.setdefault(path, "")
+
+        for path, content in searchable.items():
             if file_pattern and file_pattern not in path:
                 continue
-            # Search in raw content (if we have it)
-            cf = next((f for f in ctx.changed_files if f.filename == path), None)
-            content = (cf.raw_content if cf else None) or ""
             matches = []
             for i, line in enumerate(content.splitlines(), 1):
                 if re.search(query, line, re.IGNORECASE):
                     matches.append({"line": i, "content": line.strip()})
             if matches:
                 results.append({"file": path, "matches": matches[:10]})
-        return {"results": results[:20], "total_files_searched": len(ctx.file_asts)}
+        return {"results": results[:20], "total_files_searched": len(searchable)}
+
+    async def get_file_content(file_path: str, ref: Optional[str] = None) -> dict:
+        """Return full file content from fetched context or GitHub."""
+        cf = next((f for f in ctx.changed_files if f.filename == file_path), None)
+        if cf and cf.raw_content and (not ref or ref == "head"):
+            return {
+                "file": file_path,
+                "ref": "head",
+                "content": cf.raw_content,
+                "truncated": False,
+            }
+        if cf and cf.previous_content and ref == "base":
+            return {
+                "file": file_path,
+                "ref": "base",
+                "content": cf.previous_content,
+                "truncated": False,
+            }
+
+        target_ref = ctx.base_sha if ref == "base" else ctx.head_sha
+        content = await client.get_file_content(ctx.owner, ctx.repo, file_path, target_ref)
+        if content is None:
+            return {"error": f"File content not available: {file_path}"}
+        return {
+            "file": file_path,
+            "ref": ref or "head",
+            "content": content,
+            "truncated": False,
+        }
 
     async def get_function_source(file_path: str, function_name: str) -> dict:
         """Return source code of a specific function."""
@@ -152,6 +189,7 @@ def make_repo_tools(ctx: RepoContext, client: GitHubClient):
 
     return {
         "search_code": search_code,
+        "get_file_content": get_file_content,
         "get_function_source": get_function_source,
         "get_callers": get_callers,
         "get_impact_set": get_impact_set,

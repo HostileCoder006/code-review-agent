@@ -17,7 +17,42 @@ from app.intelligence.dependency_graph import DependencyGraph
 log = structlog.get_logger(__name__)
 
 MAX_FILES_TO_PARSE = 200
+MAX_CHANGED_FILES_TO_FETCH = 300
 PYTHON_EXTENSIONS = {".py"}
+SOURCE_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".mjs",
+    ".cjs",
+    ".java",
+    ".kt",
+    ".kts",
+    ".go",
+    ".rs",
+    ".rb",
+    ".php",
+    ".cs",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".swift",
+    ".scala",
+    ".sql",
+    ".html",
+    ".css",
+    ".scss",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".cfg",
+    ".ini",
+    ".md",
+}
 
 
 @dataclass
@@ -90,10 +125,11 @@ async def build_repo_context(
         )
         changed.append(cf)
 
-    # Fetch file contents for Python files (head and base)
+    # Fetch file contents for source/config/docs files (head and base). AST parsing
+    # remains Python-only, but agents can inspect full content for other stacks.
     async def fetch_contents(cf: ChangedFile):
         ext = "." + cf.filename.rsplit(".", 1)[-1] if "." in cf.filename else ""
-        if ext not in PYTHON_EXTENSIONS:
+        if ext.lower() not in SOURCE_EXTENSIONS or cf.status == "removed":
             return
         cf.raw_content = await client.get_file_content(owner, repo, cf.filename, head_sha)
         if cf.status in ("modified", "renamed") and cf.previous_filename:
@@ -103,13 +139,16 @@ async def build_repo_context(
         elif cf.status == "modified":
             cf.previous_content = await client.get_file_content(owner, repo, cf.filename, base_sha)
 
-    await asyncio.gather(*[fetch_contents(cf) for cf in changed], return_exceptions=True)
+    await asyncio.gather(
+        *[fetch_contents(cf) for cf in changed[:MAX_CHANGED_FILES_TO_FETCH]],
+        return_exceptions=True,
+    )
 
     ctx.changed_files = changed
 
     # Parse ASTs for changed Python files
     for cf in changed:
-        if cf.raw_content:
+        if cf.raw_content and cf.filename.endswith(".py"):
             ast = parse_file(cf.raw_content, cf.filename)
             ctx.file_asts[cf.filename] = ast
 
@@ -122,7 +161,7 @@ async def build_repo_context(
         ]
         ctx.test_files = [p for p in py_files if "test" in p.lower()]
         ctx.config_files = [
-            p for p in tree
+            p["path"] for p in tree
             if isinstance(p, dict) and p.get("path", "").endswith(
                 (".yaml", ".yml", ".toml", ".cfg", ".ini", ".env")
             )

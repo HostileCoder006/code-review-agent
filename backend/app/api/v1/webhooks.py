@@ -35,6 +35,10 @@ async def github_webhook(
         await _handle_installation(db, payload)
         return {"status": "ok"}
 
+    if event == "installation_repositories":
+        await _handle_installation_repositories(db, payload)
+        return {"status": "ok"}
+
     if event == "pull_request":
         action = payload.get("action", "")
         if action in ("opened", "synchronize", "reopened"):
@@ -63,6 +67,71 @@ async def _handle_installation(db: AsyncSession, payload: dict):
         )
         db.add(installation)
         await db.flush()
+    else:
+        installation.account_login = installation_data.get("account", {}).get(
+            "login", installation.account_login
+        )
+        installation.account_type = installation_data.get("account", {}).get(
+            "type", installation.account_type
+        )
+
+    for repo_data in payload.get("repositories", []):
+        await _upsert_repository(db, repo_data, installation_id)
+
+
+async def _handle_installation_repositories(db: AsyncSession, payload: dict):
+    installation_id = payload.get("installation", {}).get("id")
+    if not installation_id:
+        return
+
+    for repo_data in payload.get("repositories_added", []):
+        await _upsert_repository(db, repo_data, installation_id)
+
+    removed_ids = [repo.get("id") for repo in payload.get("repositories_removed", [])]
+    if removed_ids:
+        result = await db.execute(select(Repository).where(Repository.github_id.in_(removed_ids)))
+        for repository in result.scalars():
+            repository.enabled = False
+
+
+async def _upsert_repository(db: AsyncSession, repo_data: dict, installation_id: int) -> Repository:
+    result = await db.execute(
+        select(Repository).where(Repository.github_id == repo_data["id"])
+    )
+    repository = result.scalar_one_or_none()
+
+    full_name = repo_data["full_name"]
+    owner, name = full_name.split("/", 1)
+
+    if not repository:
+        repository = Repository(
+            github_id=repo_data["id"],
+            full_name=full_name,
+            owner=repo_data.get("owner", {}).get("login", owner)
+            if isinstance(repo_data.get("owner"), dict)
+            else owner,
+            name=repo_data.get("name", name),
+            default_branch=repo_data.get("default_branch", "main"),
+            language=repo_data.get("language"),
+            private=repo_data.get("private", False),
+            installation_id=installation_id,
+        )
+        db.add(repository)
+    else:
+        repository.full_name = full_name
+        repository.owner = (
+            repo_data.get("owner", {}).get("login", owner)
+            if isinstance(repo_data.get("owner"), dict)
+            else owner
+        )
+        repository.name = repo_data.get("name", name)
+        repository.default_branch = repo_data.get("default_branch", repository.default_branch)
+        repository.language = repo_data.get("language", repository.language)
+        repository.private = repo_data.get("private", repository.private)
+        repository.installation_id = installation_id
+
+    await db.flush()
+    return repository
 
 
 async def _handle_pull_request(db: AsyncSession, background_tasks: BackgroundTasks, payload: dict):
@@ -71,27 +140,18 @@ async def _handle_pull_request(db: AsyncSession, background_tasks: BackgroundTas
     installation_id = payload.get("installation", {}).get("id")
 
     # Upsert repository
-    result = await db.execute(
-        select(Repository).where(Repository.github_id == repo_data["id"])
-    )
-    repository = result.scalar_one_or_none()
-
-    if not repository:
-        repository = Repository(
-            github_id=repo_data["id"],
-            full_name=repo_data["full_name"],
-            owner=repo_data["owner"]["login"],
-            name=repo_data["name"],
-            default_branch=repo_data.get("default_branch", "main"),
-            language=repo_data.get("language"),
-            private=repo_data.get("private", False),
-            installation_id=installation_id,
+    if installation_id:
+        repository = await _upsert_repository(db, repo_data, installation_id)
+    else:
+        result = await db.execute(
+            select(Repository).where(Repository.github_id == repo_data["id"])
         )
-        db.add(repository)
-        await db.flush()
-    elif installation_id:
-        repository.installation_id = installation_id
-        await db.flush()
+        repository = result.scalar_one_or_none()
+        installation_id = repository.installation_id if repository else None
+
+    if not installation_id:
+        log.warning("pull_request_missing_installation", repo=repo_data["full_name"], pr=pr["number"])
+        raise HTTPException(status_code=400, detail="Missing GitHub installation id")
 
     if not repository.enabled:
         log.info("repository_disabled", repo=repo_data["full_name"])

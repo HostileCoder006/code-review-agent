@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from typing import Optional
 import structlog
+import uuid
 
 from app.core.database import get_db
 from app.models.finding import Finding
@@ -14,7 +15,7 @@ log = structlog.get_logger(__name__)
 
 @router.get("/", response_model=list[FindingOut])
 async def list_findings(
-    review_id: Optional[str] = Query(None),
+    review_id: Optional[uuid.UUID] = Query(None),
     severity: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
     evidence_level: Optional[str] = Query(None),
@@ -36,7 +37,7 @@ async def list_findings(
 
 
 @router.get("/{finding_id}", response_model=FindingOut)
-async def get_finding(finding_id: str, db: AsyncSession = Depends(get_db)):
+async def get_finding(finding_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Finding).where(Finding.id == finding_id))
     finding = result.scalar_one_or_none()
     if not finding:

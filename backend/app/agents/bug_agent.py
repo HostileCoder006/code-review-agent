@@ -82,6 +82,7 @@ Changed files:
 {changed_summary}
 
 Start by calling list_changed_files(), then examine each changed file's diff with get_file_diff().
+Use get_file_content() to read full changed files, especially for non-Python code.
 For any suspicious change, use get_function_source() and get_callers() to understand the full impact.
 Use search_code() to find other usages of changed APIs.
 Use get_git_history() to check if similar code has broken before.
@@ -134,6 +135,21 @@ def _get_tool_schema(name: str) -> dict | None:
                     "function_name": {"type": "string"},
                 },
                 "required": ["file_path", "function_name"],
+            },
+        },
+        "get_file_content": {
+            "description": "Get full content for a file at the PR head or base revision",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "ref": {
+                        "type": "string",
+                        "enum": ["head", "base"],
+                        "description": "Revision to read; defaults to head",
+                    },
+                },
+                "required": ["file_path"],
             },
         },
         "get_callers": {

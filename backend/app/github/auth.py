@@ -2,7 +2,6 @@
 GitHub App JWT + installation token management.
 """
 import time
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -17,9 +16,9 @@ _token_cache: dict[int, tuple[str, datetime]] = {}
 
 
 def _load_private_key() -> str:
-    path = Path(settings.GITHUB_APP_PRIVATE_KEY_PATH)
+    path = settings.resolve_private_key_path()
     if path.exists():
-        return path.read_text()
+        return path.read_text(encoding="utf-8")
     # Allow raw PEM in env for cloud deployments
     return settings.GITHUB_APP_PRIVATE_KEY_PATH.replace("\\n", "\n")
 
@@ -49,7 +48,7 @@ async def get_installation_token(installation_id: int) -> str:
         resp = await client.post(
             f"https://api.github.com/app/installations/{installation_id}/access_tokens",
             headers={
-                "Authorization": f"Bearer {app_jwt}",
+                "Authorization": f"Bearer {self._token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },

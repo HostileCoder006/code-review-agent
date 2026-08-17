@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -24,7 +25,7 @@ class GitHubClient:
     async def _headers(self) -> dict[str, str]:
         self._token = await get_installation_token(self.installation_id)
         return {
-            "Authorization": f"Bearer {self._token}",
+            "Authorization": f"Bearer {app_jwt}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
@@ -78,8 +79,9 @@ class GitHubClient:
 
     async def get_file_content(self, owner: str, repo: str, path: str, ref: str) -> str | None:
         try:
+            encoded_path = quote(path, safe="/")
             data = await self.get(
-                f"/repos/{owner}/{repo}/contents/{path}", params={"ref": ref}
+                f"/repos/{owner}/{repo}/contents/{encoded_path}", params={"ref": ref}
             )
             if isinstance(data, dict) and data.get("encoding") == "base64":
                 return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
@@ -90,8 +92,10 @@ class GitHubClient:
         return None
 
     async def get_repo_tree(self, owner: str, repo: str, sha: str) -> list[dict]:
+        commit = await self.get(f"/repos/{owner}/{repo}/git/commits/{sha}")
+        tree_sha = commit.get("tree", {}).get("sha", sha)
         data = await self.get(
-            f"/repos/{owner}/{repo}/git/trees/{sha}",
+            f"/repos/{owner}/{repo}/git/trees/{tree_sha}",
             params={"recursive": "1"},
         )
         return data.get("tree", [])
@@ -136,3 +140,4 @@ class GitHubClient:
 
     async def update_check_run(self, owner: str, repo: str, check_run_id: int, payload: dict) -> dict:
         return await self.patch(f"/repos/{owner}/{repo}/check-runs/{check_run_id}", json=payload)
+

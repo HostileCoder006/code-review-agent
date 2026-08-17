@@ -4,6 +4,7 @@ Review API endpoints — list, detail, timeline, SSE stream.
 import asyncio
 import json
 from typing import Optional
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -24,7 +25,7 @@ log = structlog.get_logger(__name__)
 
 @router.get("/", response_model=list[ReviewListOut])
 async def list_reviews(
-    repository_id: Optional[str] = Query(None),
+    repository_id: Optional[uuid.UUID] = Query(None),
     status: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
@@ -44,7 +45,7 @@ async def list_reviews(
 
 
 @router.get("/{review_id}", response_model=ReviewDetailOut)
-async def get_review(review_id: str, db: AsyncSession = Depends(get_db)):
+async def get_review(review_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Review)
         .options(
@@ -61,7 +62,7 @@ async def get_review(review_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{review_id}/timeline")
-async def get_timeline(review_id: str, db: AsyncSession = Depends(get_db)):
+async def get_timeline(review_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Review)
         .options(selectinload(Review.timeline))
@@ -84,7 +85,7 @@ async def get_timeline(review_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{review_id}/stream")
-async def stream_timeline(review_id: str):
+async def stream_timeline(review_id: uuid.UUID):
     """Server-sent events stream for real-time investigation updates."""
     async def event_generator():
         r = get_redis()

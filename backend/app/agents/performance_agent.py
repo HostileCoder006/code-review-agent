@@ -93,7 +93,7 @@ Changed files:
 
 For each changed file:
 1. Get the diff with get_file_diff()
-2. Read full function source for any added/changed functions
+2. Read the file with get_file_content(), then read full Python function source where available
 3. Look for loops, database calls, and expensive operations
 4. Check get_callers() to understand call frequency
 """

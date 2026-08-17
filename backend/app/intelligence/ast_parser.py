@@ -110,7 +110,7 @@ def _extract_python_treesitter(tree, source: str, file_path: str) -> FileAST:
 
         elif node.type in ("function_definition", "async_function_definition"):
             fn = _extract_function(node, source, file_path)
-            fn.is_async = node.type == "async_function_definition"
+            fn.is_async = node.type == "async_function_definition" or any(c.type == "async" for c in node.children)
             ast.functions.append(fn)
             return  # don't recurse into nested — handled separately
 
